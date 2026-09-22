@@ -68,9 +68,9 @@ export default async function handler(req, res) {
 
     /* ⬇ مدل پایدار اول (نه ۳.۵ شلوغ!) — اگر body مدل خاصی خواست، همان اول */
     const MODELS = [
-      model || 'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-2.0-flash-lite',
+      model || 'gemini-3.5-flash',
+      'gemini-3.4-flash',
+      'gemini-3.5-flash-lite',
     ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
     /* سقف خروجی = سقف زمان تولید — جلوی پاسخ‌های بی‌نهایت را می‌گیرد */
