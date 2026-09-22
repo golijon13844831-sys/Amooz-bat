@@ -1,11 +1,18 @@
 // api/gemini.js
 // پروکسی سمت سرور برای Gemini API روی Vercel
-// کلید API فقط اینجا (سمت سرور) استفاده می‌شه و هرگز به کلاینت فرستاده نمی‌شه.
+// 🔧 نسخه اصلاح‌شده: maxDuration + تایم‌اوت کنترل‌شده + rate-limit بالا
 
-const RATE_LIMIT_WINDOW_MS = 60 * 1000; // یک دقیقه
-const RATE_LIMIT_MAX = 20; // حداکثر ۲۰ ریکوئست در دقیقه برای هر IP
+// ⬇⬇⬇ فیکس اصلی ۵۰۴ — تایم‌اوت از ۱۰ ثانیه به ۶۰ ثانیه ⬇⬇⬇
+export const maxDuration = 60;
 
-// حافظه‌ی موقت برای rate limit (ساده، در حد یک instance؛ برای پروژه‌ی جدی از Redis/Upstash استفاده کنید)
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+// ⬆ بالاتر از قبل: چون همه کاربران سایت ما از «یک IP» (سرور آموزیار) می‌آیند،
+// محدودیت قبلی ۲۰/دقیقه عملاً روی کل سایت اعمال می‌شد! خود سرور ما per-user محدود می‌کند.
+const RATE_LIMIT_MAX = 120;
+
+// تایم‌اوت داخلی فراخوانی Gemini — کمتر از maxDuration تا خطای «تمیز» برگردد نه کرش
+const GEMINI_TIMEOUT_MS = 55000;
+
 const rateLimitMap = new Map();
 
 function isRateLimited(ip) {
@@ -20,26 +27,28 @@ function isRateLimited(ip) {
   entry.count += 1;
   rateLimitMap.set(ip, entry);
 
+  // پاکسازی حافظه: کلیدهای قدیمی را حذف کن (جلوی نشت حافظه در instance گرم)
+  if (rateLimitMap.size > 5000) {
+    for (const [key, val] of rateLimitMap) {
+      if (now - val.start > RATE_LIMIT_WINDOW_MS) rateLimitMap.delete(key);
+    }
+  }
+
   return entry.count > RATE_LIMIT_MAX;
 }
 
 export default async function handler(req, res) {
-  // CORS برای اینکه از هر سایتی هم بشه صداش زد (در صورت نیاز محدودش کنید)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'فقط متد POST مجاز است' });
   }
 
-  // --- محافظت اختیاری با توکن دسترسی ---
-  // اگر ACCESS_TOKEN رو در Environment Variables ست کنید، کاربر باید همون توکن رو
-  // در هدر Authorization بفرسته: Authorization: Bearer <token>
+  // --- محافظت با توکن (Authorization: Bearer <ACCESS_TOKEN>) ---
   const accessToken = process.env.ACCESS_TOKEN;
   if (accessToken) {
     const authHeader = req.headers.authorization || '';
@@ -49,7 +58,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // --- محدودیت نرخ درخواست ساده بر اساس IP ---
+  // --- محدودیت نرخ بر اساس IP ---
   const ip =
     req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
     req.socket?.remoteAddress ||
@@ -76,8 +85,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'باید prompt یا messages بفرستید' });
     }
 
-    // اگر messages بدن (فرمت چند پیامی)، همون رو به contents تبدیل می‌کنیم
-    // اگر فقط prompt بدن، یک پیام ساده می‌سازیم
     const contents = messages
       ? messages.map((m) => ({
           role: m.role === 'assistant' ? 'model' : 'user',
@@ -87,6 +94,10 @@ export default async function handler(req, res) {
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
+    // ⬇ فیکس: تایم‌اوت واقعی روی فراخوانی Gemini
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), GEMINI_TIMEOUT_MS);
+
     const geminiRes = await fetch(geminiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -94,7 +105,9 @@ export default async function handler(req, res) {
         contents,
         ...(generationConfig ? { generationConfig } : {}),
       }),
+      signal: ctrl.signal,
     });
+    clearTimeout(timer);
 
     const data = await geminiRes.json();
 
@@ -107,6 +120,10 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ text, raw: data });
   } catch (err) {
+    // ⬇ فیکس: خطای تایم‌اوت را تمیز برگردان (نه کرش مبهم)
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'زمان پاسخ Gemini بیش از ۵۵ ثانیه طول کشید — دوباره تلاش کنید' });
+    }
     console.error(err);
     return res.status(500).json({ error: 'خطای داخلی سرور', detail: String(err) });
   }
