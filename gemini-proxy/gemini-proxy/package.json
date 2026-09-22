@@ -1,0 +1,9 @@
+{
+  "name": "gemini-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless proxy for Google Gemini API, deployable on Vercel",
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
